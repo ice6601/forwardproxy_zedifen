@@ -1,52 +1,128 @@
 name: Build
+
 on:
   push:
     branches: [naive]
     paths-ignore: [README.md]
   release:
     types: [published]
+  workflow_dispatch:
+
 defaults:
   run:
     shell: bash
+
 jobs:
   build_caddy_with_naive:
+    permissions:
+      contents: write # Required by the existing release upload step.
     strategy:
+      fail-fast: false
       matrix:
-        target_os: [linux]
+        target_os: [linux, windows]
         target_arch: [amd64, arm64]
     runs-on: ubuntu-latest
     env:
+      GOTOOLCHAIN: local
       BUNDLE: caddy-forwardproxy-naive-${{ matrix.target_os }}-${{ matrix.target_arch }}
     steps:
       - uses: actions/checkout@v6
-      - run: printf 'CADDY_VERSION=%s\n' "$(<CADDY_VERSION)" >> "$GITHUB_ENV"
+
+      - name: Read Caddy version
+        run: |
+          set -euo pipefail
+          CADDY_VERSION="$(tr -d '\r\n' < CADDY_VERSION)"
+          test "$CADDY_VERSION" = v2.11.8
+          printf 'CADDY_VERSION=%s\n' "$CADDY_VERSION" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v6
         with:
           repository: caddyserver/caddy
           ref: ${{ env.CADDY_VERSION }}
           path: .caddy-bbr
+
       - name: Check BBRv1 patch
         run: git -C .caddy-bbr apply --check "$GITHUB_WORKSPACE/caddy-sing-quic-bbrv1.patch"
+
       - name: Apply BBRv1 patch
         run: git -C .caddy-bbr apply "$GITHUB_WORKSPACE/caddy-sing-quic-bbrv1.patch"
+
       - uses: actions/setup-go@v6
         with:
-          go-version: ^1.26.x
+          go-version: '1.27.x'
+          check-latest: true
+
       - run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-      - run: GOOS=${{ matrix.target_os }} GOARCH=${{ matrix.target_arch }} ~/go/bin/xcaddy build "$CADDY_VERSION" --replace "github.com/caddyserver/caddy/v2=$GITHUB_WORKSPACE/.caddy-bbr" --with "github.com/caddyserver/forwardproxy=$GITHUB_WORKSPACE"
-      - name: Pack naiveproxy assets
+
+      - name: Select executable and archive names
         run: |
-          mkdir ${{ env.BUNDLE }}
-          cp caddy LICENSE README.md ${{ env.BUNDLE }}
-          tar cJf ${{ env.BUNDLE }}.tar.xz ${{ env.BUNDLE }}
-          openssl sha256 ./caddy >sha256sum.txt
-          echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
+          set -euo pipefail
+          if [ '${{ matrix.target_os }}' = windows ]; then
+            printf 'BINARY=caddy.exe\nARCHIVE=%s.zip\n' "$BUNDLE" >> "$GITHUB_ENV"
+          else
+            printf 'BINARY=caddy\nARCHIVE=%s.tar.xz\n' "$BUNDLE" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Caddy with four plugins
+        run: |
+          set -euo pipefail
+          GOOS=${{ matrix.target_os }} GOARCH=${{ matrix.target_arch }} CGO_ENABLED=0 \
+          ~/go/bin/xcaddy build "$CADDY_VERSION" \
+            --replace "github.com/caddyserver/caddy/v2=$GITHUB_WORKSPACE/.caddy-bbr" \
+            --with "github.com/caddyserver/forwardproxy=$GITHUB_WORKSPACE" \
+            --with github.com/caddy-dns/cloudflare \
+            --with github.com/greenpau/caddy-security \
+            --with github.com/mholt/caddy-l4 \
+            --output "$BINARY"
+          test -s "$BINARY"
+
+      - name: Smoke test Linux AMD64 build
+        if: matrix.target_os == 'linux' && matrix.target_arch == 'amd64'
+        run: |
+          set -euo pipefail
+          ./caddy version
+          ./caddy list-modules > modules.txt
+          grep -Fx 'http.handlers.forward_proxy' modules.txt
+          grep -Fx 'dns.providers.cloudflare' modules.txt
+          grep -Fx 'security' modules.txt
+          grep -Fx 'layer4' modules.txt
+
+      - name: Pack assets and checksums
+        run: |
+          set -euo pipefail
+          mkdir "$BUNDLE"
+          cp "$BINARY" LICENSE README.md "$BUNDLE/"
+          go version -m "$BINARY" > "$BUNDLE/build-info.txt"
+          {
+            go version
+            printf 'Forwardproxy commit: '
+            git rev-parse HEAD
+            printf 'Caddy commit: '
+            git -C .caddy-bbr rev-parse HEAD
+            sha256sum caddy-sing-quic-bbrv1.patch
+          } > "$BUNDLE/sources.txt"
+          (
+            cd "$BUNDLE"
+            sha256sum "$BINARY" > SHA256SUMS
+          )
+          if [ '${{ matrix.target_os }}' = windows ]; then
+            python3 -m zipfile -c "$ARCHIVE" "$BUNDLE"
+          else
+            tar cJf "$ARCHIVE" "$BUNDLE"
+          fi
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
       - uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.BUNDLE }}.tar.xz caddy executable sha256 ${{ env.SHA256SUM }}
-          path: sha256sum.txt
-      - name: Upload caddy assets
-        if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${GITHUB_REF##*/}"  ${{ env.BUNDLE }}.tar.xz --clobber
+          name: ${{ env.BUNDLE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        run: gh release upload "$RELEASE_TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
