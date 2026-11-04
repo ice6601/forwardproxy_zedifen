@@ -59,7 +59,7 @@ index a101882..548a103 100644
  	"go.uber.org/zap"
  	"go.uber.org/zap/zapcore"
  	"golang.org/x/net/http/httpguts"
-@@ -1091,6 +1093,11 @@ func (s *Server) serveHTTP3(addr caddy.NetworkAddress, tlsCfg *tls.Config) error
+@@ -1091,5 +1093,10 @@ func (s *Server) serveHTTP3(addr caddy.NetworkAddress, tlsCfg *tls.Config) error
  			// listener and call ServeListener, so anything set here is ignored.
  			// The QUIC settings that actually apply are in NetworkAddress.ListenQUIC.
  			IdleTimeout: time.Duration(s.IdleTimeout),
@@ -70,4 +70,3 @@ index a101882..548a103 100644
 +			},
  		}
  	}
- 
