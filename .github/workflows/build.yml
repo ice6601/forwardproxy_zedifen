@@ -107,19 +107,16 @@ jobs:
           else
             tar cJf "$ARCHIVE" "$BUNDLE"
           fi
-          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ env.BUNDLE }}
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sha256
+          path: ${{ env.ARCHIVE }}
           if-no-files-found: error
 
       - name: Upload release assets
         if: github.event_name == 'release'
-        run: gh release upload "$RELEASE_TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+        run: gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
